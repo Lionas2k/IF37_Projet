@@ -1,0 +1,238 @@
+#include <Wire.h>
+#include <DFRobot_B_LUX_V30B.h>
+#include <SoftwareSerial.h>
+#include <Adafruit_GFX.h>
+#include <Arduino_ST7789_Fast.h>
+#include "DFRobotDFPlayerMini.h"
+#include <Adafruit_ST7789.h>
+
+// Déclaration du luxmètre
+DFRobot_B_LUX_V30B myLux(4, A5, A4);  
+
+// Définition des broches
+#define HUMIDITY_PIN A0
+#define TFT_DC 7
+#define TFT_RST 8
+#define TFT_CS 6
+#define DFPLAYER_RX 2
+#define DFPLAYER_TX 3
+
+#ifndef BLACK
+#define BLACK 0x0000
+#endif
+#ifndef WHITE
+#define WHITE 0xFFFF
+#endif
+
+// Objets
+SoftwareSerial dfPlayerSerial(DFPLAYER_RX, DFPLAYER_TX);
+DFRobotDFPlayerMini dfPlayer;
+Arduino_ST7789 tft = Arduino_ST7789(TFT_DC, TFT_RST, TFT_CS);
+
+unsigned long lastUpdate = 0;
+bool toggle = false;
+unsigned long lastSoundTime = 0;
+const unsigned long soundCooldown = 10000; // duree entre deux son, ici 10sec, mais on pourrait mettre 15min ou 30min
+
+
+
+const int NB_LECTURES = 96;     // Nombre de lectures à stocker (48h * 2 lectures/heure = 96)
+const long INTERVALLE_LECTURE_MS = 100; // Intervalles entre deux lectures de luminosité. Ici a 100 pour la presentation, mais a mettre a 30*60*1000 pour un test toutes les 30mins.
+int lux_tableau[NB_LECTURES];
+int index_actuel = 0;
+int limite_humidite = 680;
+int limite_lux = 420; 
+int limite_nuit = 100;
+unsigned long tempsDerniereLecture = 0;
+bool affiche_happy = false;
+
+void setup() {
+  Serial.begin(9600);
+  delay(1000);
+
+  myLux.begin();
+
+  dfPlayerSerial.begin(9600);
+  if (!dfPlayer.begin(dfPlayerSerial)) {
+    Serial.println("Erreur DFPlayer !");
+  } else {
+    dfPlayer.volume(25);
+  }
+
+  tft.init(240, 240);
+  tft.setRotation(3);
+  tft.fillScreen(BLACK);
+  tft.setTextColor(WHITE);
+  tft.setTextSize(2);
+
+  init_tableau();
+}
+
+void init_tableau(){
+  for (int i = 0; i < NB_LECTURES; i++) {
+    lux_tableau[i] = limite_lux; // <-- C'est ici que la modification est faite !
+    Serial.print(i);
+    Serial.print(" : ");
+    Serial.println(lux_tableau[i]);
+  }
+  delay(1000);
+}
+
+void drawHappyFace() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillCircle(120, 120, 100, ST77XX_GREEN);
+  tft.fillCircle(80, 90, 15, ST77XX_BLACK);
+  tft.fillCircle(160, 90, 15, ST77XX_BLACK);
+
+  for (int i = 0; i <= 180; i += 10) {
+    float angle = i * 3.14159 / 180;
+    int x = 120 + cos(angle) * 40;
+    int y = 160 + sin(angle) * 15;
+    tft.fillCircle(x, y, 2, ST77XX_BLACK);
+  }
+}
+
+void drawSadFace() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillCircle(120, 120, 100, ST77XX_RED);
+  tft.fillCircle(80, 90, 15, ST77XX_BLACK);
+  tft.fillCircle(160, 90, 15, ST77XX_BLACK);
+
+  for (int i = 0; i <= 180; i += 10) {
+    float angle = i * 3.14159 / 180;
+    int x = 120 + cos(angle) * 40;
+    int y = 180 - sin(angle) * 15;
+    tft.fillCircle(x, y, 2, ST77XX_BLACK);
+  }
+}
+
+void drawWaterDrop() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillTriangle(85, 160, 155, 160, 120, 40, ST77XX_BLUE);
+  tft.fillCircle(120, 160, 45, ST77XX_BLUE);
+}
+
+void drawSun() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillCircle(120, 120, 60, ST77XX_YELLOW);
+  for (int i = 0; i < 360; i += 30) {
+    float angle = i * 3.14159 / 180;
+    int x1 = 120 + cos(angle) * 60;
+    int y1 = 120 + sin(angle) * 60;
+    int x2 = 120 + cos(angle) * 90;
+    int y2 = 120 + sin(angle) * 90;
+    tft.drawLine(x1, y1, x2, y2, ST77XX_YELLOW);
+  }
+}
+
+// Fonction qui alterne entre deux fonctions de dessin
+void alternateScreens(void (*screen1)(), void (*screen2)()) {
+  unsigned long now = millis();
+  if (now - lastUpdate > 1000) {  // alterne toutes les secondes
+    toggle = !toggle;
+    if (toggle) screen1();
+    else screen2();
+    lastUpdate = now;
+  }
+}
+void alternateScreens2() {
+  static int step = 0;
+  static unsigned long lastSwitch = 0;
+  unsigned long now = millis();
+
+  if (now - lastSwitch >= 1000) {  // change toutes les 1 seconde
+    switch (step) {
+      case 0:
+      case 2:
+        drawSadFace();
+        break;
+      case 1:
+        drawSun();
+        break;
+      case 3:
+        drawWaterDrop();
+        break;
+    }
+
+    step = (step + 1) % 4;  // cycle de 4 étapes
+    lastSwitch = now;
+  }
+}
+
+bool lire_lux(){
+  if (millis() - tempsDerniereLecture >= INTERVALLE_LECTURE_MS) {
+    tempsDerniereLecture = millis(); 
+    float lux = myLux.lightStrengthLux();
+    int intLux = (int)lux;
+    lux_tableau[index_actuel]=intLux;
+
+    Serial.print(index_actuel);
+    Serial.print(" : ");
+    Serial.println(intLux);
+    index_actuel = (index_actuel + 1) % NB_LECTURES;
+
+    if (intLux <= limite_nuit) {
+      return true;
+    }
+    return false;
+  }
+}
+
+float moyenne_lux(){
+  float moyenne=0;
+  for (int i = 0; i < NB_LECTURES; i++) {
+    moyenne = moyenne + lux_tableau[i];
+  }
+  moyenne = moyenne/NB_LECTURES;
+  Serial.print("Moyenne : ");
+  Serial.println(moyenne);
+  return moyenne;
+}
+
+void loop() {
+  int humidityRaw = analogRead(HUMIDITY_PIN);
+  float avg_lux;
+  bool isItNight = false;
+
+  isItNight = lire_lux();
+  avg_lux = moyenne_lux();
+  delay(50);
+
+  bool lowLight = avg_lux >= 0 && avg_lux < limite_lux;
+  bool lowHumidity = humidityRaw < limite_humidite;
+
+  if (lowLight && lowHumidity) {
+    // Serial.println(humidityRaw);
+    alternateScreens2();
+    affiche_happy = false;
+    if (isItNight == false && millis() - lastSoundTime >= soundCooldown) {
+      dfPlayer.play(2);
+      lastSoundTime = millis();
+    }
+  }
+  else if (lowLight) {
+    // Serial.println(humidityRaw);
+    alternateScreens(drawSadFace, drawSun);
+    affiche_happy = false;
+    if (isItNight == false && millis() - lastSoundTime >= soundCooldown) {
+      dfPlayer.play(0);
+      lastSoundTime = millis();
+    }
+  }
+  else if (lowHumidity) {
+    // Serial.println(humidityRaw);
+    alternateScreens(drawSadFace, drawWaterDrop);
+    affiche_happy = false;
+    if (isItNight == false && millis() - lastSoundTime >= soundCooldown) {
+      dfPlayer.play(1);
+      lastSoundTime = millis();
+    }
+  }
+  else {
+    if (affiche_happy == false){
+      drawHappyFace();
+      affiche_happy = true;
+    }
+
+  }
+}
